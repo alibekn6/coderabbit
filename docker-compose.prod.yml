@@ -1,0 +1,212 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:16-alpine
+    container_name: notion_db_prod
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app-network
+    expose:
+      - "5432"
+
+  # Redis - Message broker for Celery
+  redis:
+    image: redis:7-alpine
+    container_name: notion_redis_prod
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - app-network
+    volumes:
+      - redis_data:/data
+    expose:
+      - "6379"
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+
+  # Database Migrations - runs Alembic migrations
+  migrations:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: notion_migrations_prod
+    environment:
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      DB_HOST: db
+      DB_PORT: 5432
+      SECRET_KEY: ${SECRET_KEY}
+      NOTION_API_KEY: ${NOTION_API_KEY}
+      NOTION_DATABASE_ID: ${NOTION_DATABASE_ID}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - app-network
+    command: alembic upgrade head
+    restart: "no"  # Run once and exit
+
+  # FastAPI Application (Production with multiple workers)
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: notion_app_prod
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      # Database
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      DB_HOST: db
+      DB_PORT: 5432
+
+      # JWT
+      SECRET_KEY: ${SECRET_KEY}
+      ALGORITHM: ${ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-7}
+
+      # Notion API
+      NOTION_API_KEY: ${NOTION_API_KEY}
+      NOTION_DATABASE_ID: ${NOTION_DATABASE_ID}
+      NOTION_VERSION: ${NOTION_VERSION:-2022-06-28}
+
+      # Redis & Celery
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      CACHE_UPDATE_INTERVAL_MINUTES: ${CACHE_UPDATE_INTERVAL_MINUTES:-30}
+
+      # App
+      DEBUG: false
+      APP_NAME: ${APP_NAME:-NotionStats}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    networks:
+      - app-network
+    # Production: no volume mounts, use workers for performance
+    command: >
+      uvicorn src.main:app
+      --host 0.0.0.0
+      --port 8000
+      --workers 4
+      --loop uvloop
+      --no-access-log
+
+  # Celery Worker - processes background tasks (production)
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: notion_celery_worker_prod
+    restart: always
+    environment:
+      # Database
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      DB_HOST: db
+      DB_PORT: 5432
+
+      # Notion API
+      NOTION_API_KEY: ${NOTION_API_KEY}
+      NOTION_DATABASE_ID: ${NOTION_DATABASE_ID}
+      NOTION_VERSION: ${NOTION_VERSION:-2022-06-28}
+
+      # Redis & Celery
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      CACHE_UPDATE_INTERVAL_MINUTES: ${CACHE_UPDATE_INTERVAL_MINUTES:-30}
+
+      # Other
+      SECRET_KEY: ${SECRET_KEY}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    networks:
+      - app-network
+    command: celery -A src.celery_app worker --loglevel=warning --concurrency=2
+
+  # Celery Beat - schedules periodic tasks (production)
+  celery-beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: notion_celery_beat_prod
+    restart: always
+    environment:
+      # Database
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      DB_HOST: db
+      DB_PORT: 5432
+
+      # Notion API
+      NOTION_API_KEY: ${NOTION_API_KEY}
+      NOTION_DATABASE_ID: ${NOTION_DATABASE_ID}
+      NOTION_VERSION: ${NOTION_VERSION:-2022-06-28}
+
+      # Redis & Celery
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      CACHE_UPDATE_INTERVAL_MINUTES: ${CACHE_UPDATE_INTERVAL_MINUTES:-30}
+
+      # Other
+      SECRET_KEY: ${SECRET_KEY}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    networks:
+      - app-network
+    command: celery -A src.celery_app beat --loglevel=warning
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local

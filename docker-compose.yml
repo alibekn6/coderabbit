@@ -1,0 +1,222 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:16-alpine
+    container_name: notion_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app-network
+
+  # Redis - Message broker for Celery
+  redis:
+    image: redis:7-alpine
+    container_name: notion_redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - app-network
+    volumes:
+      - redis_data:/data
+
+  # Database Migrations - runs Alembic migrations
+  migrations:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: notion_migrations
+    environment:
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      DB_HOST: db
+      DB_PORT: 5432
+      SECRET_KEY: ${SECRET_KEY}
+      NOTION_API_KEY: ${NOTION_API_KEY}
+      NOTION_DATABASE_ID: ${NOTION_DATABASE_ID}
+      NOTION_PROJECTS_DATABASE_ID: ${NOTION_PROJECTS_DATABASE_ID}
+      NOTION_KANBAN_DATABASE_ID: ${NOTION_KANBAN_DATABASE_ID}
+      NOTION_CONVERSATION_DATABASE_ID: ${NOTION_CONVERSATION_DATABASE_ID}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - app-network
+    volumes:
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+    command: alembic upgrade head
+    restart: "no"  # Run once and exit
+
+  # FastAPI Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: notion_app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # Database
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      DB_HOST: db
+      DB_PORT: 5432
+
+      # JWT
+      SECRET_KEY: ${SECRET_KEY}
+      ALGORITHM: ${ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-7}
+
+      # Notion API
+      NOTION_API_KEY: ${NOTION_API_KEY}
+      NOTION_DATABASE_ID: ${NOTION_DATABASE_ID}
+      NOTION_PROJECTS_DATABASE_ID: ${NOTION_PROJECTS_DATABASE_ID}
+      NOTION_KANBAN_DATABASE_ID: ${NOTION_KANBAN_DATABASE_ID}
+      NOTION_CONVERSATION_DATABASE_ID: ${NOTION_CONVERSATION_DATABASE_ID}
+      NOTION_VERSION: ${NOTION_VERSION:-2022-06-28}
+
+      # Redis & Celery
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      CACHE_UPDATE_INTERVAL_MINUTES: ${CACHE_UPDATE_INTERVAL_MINUTES:-30}
+
+      # App
+      DEBUG: ${DEBUG:-false}
+      APP_NAME: ${APP_NAME:-NotionStats}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    networks:
+      - app-network
+    volumes:
+      - ./src:/app/src
+      - ./alembic:/app/alembic
+    command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Celery Worker - processes background tasks
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: notion_celery_worker
+    restart: unless-stopped
+    environment:
+      # Database
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      DB_HOST: db
+      DB_PORT: 5432
+
+      # Notion API
+      NOTION_API_KEY: ${NOTION_API_KEY}
+      NOTION_DATABASE_ID: ${NOTION_DATABASE_ID}
+      NOTION_PROJECTS_DATABASE_ID: ${NOTION_PROJECTS_DATABASE_ID}
+      NOTION_KANBAN_DATABASE_ID: ${NOTION_KANBAN_DATABASE_ID}
+      NOTION_CONVERSATION_DATABASE_ID: ${NOTION_CONVERSATION_DATABASE_ID}
+      NOTION_VERSION: ${NOTION_VERSION:-2022-06-28}
+
+      # Redis & Celery
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      CACHE_UPDATE_INTERVAL_MINUTES: ${CACHE_UPDATE_INTERVAL_MINUTES:-30}
+
+      # Other
+      SECRET_KEY: ${SECRET_KEY}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    networks:
+      - app-network
+    volumes:
+      - ./src:/app/src
+    command: celery -A src.celery_app worker --loglevel=info
+
+  # Celery Beat - schedules periodic tasks (every 30 minutes)
+  celery-beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: notion_celery_beat
+    restart: unless-stopped
+    environment:
+      # Database
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      DB_HOST: db
+      DB_PORT: 5432
+
+      # Notion API
+      NOTION_API_KEY: ${NOTION_API_KEY}
+      NOTION_DATABASE_ID: ${NOTION_DATABASE_ID}
+      NOTION_PROJECTS_DATABASE_ID: ${NOTION_PROJECTS_DATABASE_ID}
+      NOTION_KANBAN_DATABASE_ID: ${NOTION_KANBAN_DATABASE_ID}
+      NOTION_CONVERSATION_DATABASE_ID: ${NOTION_CONVERSATION_DATABASE_ID}
+      NOTION_VERSION: ${NOTION_VERSION:-2022-06-28}
+
+      # Redis & Celery
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      CACHE_UPDATE_INTERVAL_MINUTES: ${CACHE_UPDATE_INTERVAL_MINUTES:-30}
+
+      # Other
+      SECRET_KEY: ${SECRET_KEY}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    networks:
+      - app-network
+    volumes:
+      - ./src:/app/src
+    command: celery -A src.celery_app beat --loglevel=info
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
