@@ -4,6 +4,7 @@ This dramatically improves response times from 3-4 minutes to milliseconds.
 """
 from sqlalchemy.orm import Session
 from typing import Optional
+from datetime import datetime, date
 
 from src.repositories.cache_repository import CacheRepository
 from src.models.notion import (
@@ -171,17 +172,69 @@ class CachedNotionService:
     def query_tasks(self, status: Optional[str] = None, priority: Optional[str] = None) -> NotionTasksResponse:
         """Query tasks with filters from cache"""
         all_tasks = self.get_all_tasks()
-        
+
         # Filter tasks
         filtered_tasks = all_tasks.tasks
         if status:
             filtered_tasks = [t for t in filtered_tasks if t.properties.status == status]
         if priority:
             filtered_tasks = [t for t in filtered_tasks if t.properties.priority == priority]
-        
+
         return NotionTasksResponse(
             total_count=len(filtered_tasks),
             tasks=filtered_tasks
+        )
+
+    def get_tasks_created_today(self) -> NotionTasksResponse:
+        """Get tasks that were created today from cache"""
+        all_tasks = self.get_all_tasks()
+        today = date.today()
+
+        # Filter tasks created today
+        tasks_created_today = [
+            task for task in all_tasks.tasks
+            if task.created_time.date() == today
+        ]
+
+        return NotionTasksResponse(
+            total_count=len(tasks_created_today),
+            tasks=tasks_created_today
+        )
+
+    def get_tasks_completed_today(self) -> NotionTasksResponse:
+        """Get tasks that were completed today from cache"""
+        cached_tasks = self.cache_repo.get_all_cached_tasks()
+        today = date.today()
+
+        # Filter tasks completed today (status = "Done" and last_edited_time is today)
+        tasks_completed_today = []
+        for cached_task in cached_tasks:
+            # A task is considered completed today if:
+            # 1. Status is "Done"
+            # 2. Last edited time is today (assuming status changed to Done today)
+            if (cached_task.status == "Done" and
+                cached_task.notion_last_edited_time.date() == today):
+
+                task = NotionTask(
+                    page_id=cached_task.page_id,
+                    created_time=cached_task.notion_created_time,
+                    last_edited_time=cached_task.notion_last_edited_time,
+                    properties=TaskProperties(
+                        task_name=cached_task.task_name,
+                        status=cached_task.status,
+                        priority=cached_task.priority,
+                        effort_level=cached_task.effort_level,
+                        description=cached_task.description,
+                        due_date=cached_task.due_date,
+                        task_type=cached_task.task_type or [],
+                        assignee=cached_task.assignee or []
+                    )
+                )
+                tasks_completed_today.append(task)
+
+        return NotionTasksResponse(
+            total_count=len(tasks_completed_today),
+            tasks=tasks_completed_today
         )
 
     # ============= Todos Operations =============

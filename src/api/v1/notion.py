@@ -54,7 +54,7 @@ def filter_tasks(
     Filter tasks by status and/or priority (cached - instant response!)
 
     **Authentication required**: JWT token in Authorization header
-    
+
     **Performance**: Returns cached data (~50ms response time)
 
     Args:
@@ -72,6 +72,80 @@ def filter_tasks(
     )
     service = CachedNotionService(db)
     return service.query_tasks(status=status, priority=priority)
+
+
+@router.get("/tasks/created-today", response_model=NotionTasksResponse)
+def get_tasks_created_today(
+    current_user: CurrentUser,
+    db: Session = Depends(get_sync_db)
+):
+    """
+    Get tasks that were created today (cached - instant response!)
+
+    **Authentication required**: JWT token in Authorization header
+
+    **Performance**: Returns cached data (~50ms response time)
+
+    Returns:
+        NotionTasksResponse: All tasks created today with their properties including:
+        - Task name, status, priority
+        - Creation time
+        - Assignees and task type
+        - Due date and effort level
+    """
+    logger.info("get_tasks_created_today_request", user_id=current_user.id)
+    try:
+        service = CachedNotionService(db)
+        return service.get_tasks_created_today()
+    except Exception as e:
+        logger.error(
+            "get_tasks_created_today_error",
+            user_id=current_user.id,
+            error=str(e)
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch tasks created today from cache"
+        )
+
+
+@router.get("/tasks/completed-today", response_model=NotionTasksResponse)
+def get_tasks_completed_today(
+    current_user: CurrentUser,
+    db: Session = Depends(get_sync_db)
+):
+    """
+    Get tasks that were completed today (cached - instant response!)
+
+    **Authentication required**: JWT token in Authorization header
+
+    **Performance**: Returns cached data (~50ms response time)
+
+    Returns:
+        NotionTasksResponse: All tasks completed today (status changed to 'Done' today) including:
+        - Task name, priority, and effort level
+        - Completion time (last_edited_time)
+        - Assignees and task type
+        - Due date
+
+    A task is considered completed today if:
+    - Status is 'Done'
+    - Last edited time is today (indicating the status was changed to Done today)
+    """
+    logger.info("get_tasks_completed_today_request", user_id=current_user.id)
+    try:
+        service = CachedNotionService(db)
+        return service.get_tasks_completed_today()
+    except Exception as e:
+        logger.error(
+            "get_tasks_completed_today_error",
+            user_id=current_user.id,
+            error=str(e)
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch tasks completed today from cache"
+        )
 
 
 @router.get("/projects", response_model=NotionProjectsResponse)
